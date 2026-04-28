@@ -1,0 +1,151 @@
+// OpsHub Prisma Schema
+// Shares the existing dochub Postgres database with TicketHub and DocHub.
+// All models prefixed Op_ and live in the `opshub` schema so the three
+// apps don't collide.
+// Schema is additive only after first push — never rename or drop columns.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+  schemas  = ["opshub"]
+}
+
+// ─── STAFF GATE ────────────────────────────────────────────────────────────
+
+/// Email allowlist for OpsHub access. NextAuth's signIn callback checks
+/// here — only emails present in this table can sign in. Mirrors DocHub's
+/// StaffUser pattern; intentionally separate so OpsHub access can diverge
+/// from DocHub access (e.g. junior tech sees DH but not OpsHub).
+model Op_StaffUser {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  name      String?
+  role      String   @default("TECH") // ADMIN | TECH
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("op_staff_users")
+  @@schema("opshub")
+}
+
+// ─── AUDIT LOG ─────────────────────────────────────────────────────────────
+
+/// Append-only record of every privileged action OpsHub performs against
+/// a client tenant — Graph mutations, AD writes (Phase 2), agent commands
+/// (Phase 2), service restarts (Phase 2). Drives later billing
+/// automation and forensic review. Never delete rows.
+model Op_AuditLog {
+  id            String   @id @default(cuid())
+  /// PCC2K staff user who initiated. Nullable for system-initiated
+  /// (cron, agent heartbeat) actions.
+  actorEmail    String?
+  /// TH_Client.name copied at write time (cross-app key, snapshot).
+  /// Stored as denormalized text so audit rows survive client rename.
+  clientName    String?
+  /// Action verb in dotted form, e.g. "graph.user.passwordReset",
+  /// "agent.windows.restartService", "monitor.alert.fired".
+  action        String
+  /// Target identifier — usually an Entra user id, a hostname, or a
+  /// service name. Free-form by intent; the action determines shape.
+  target        String?
+  /// "ok" | "error". Strings (not enum) so Phase 2/3 can introduce
+  /// new outcomes without a migration.
+  outcome       String
+  /// Optional structured detail — JSON; e.g. error message, before/after
+  /// values for diffable mutations.
+  detailJson    String?
+  createdAt     DateTime @default(now())
+
+  @@index([clientName, createdAt])
+  @@index([actorEmail, createdAt])
+  @@index([action, createdAt])
+  @@map("op_audit_log")
+  @@schema("opshub")
+}
+
+// ─── AGENTS (Phase 2 — empty in Phase 0) ───────────────────────────────────
+
+/// One row per OpsHub-Agent installed in a client's network. Agents
+/// connect outbound via WSS and present their `secretHash` (HMAC of
+/// the original enrollment token) on every command.
+model Op_Agent {
+  id            String    @id @default(cuid())
+  /// TH_Client.name (cross-app key).
+  clientName    String
+  /// Friendly hostname the agent reports on first connect.
+  hostname      String?
+  /// Operating system reported by agent: "windows" | "linux" | "darwin".
+  os            String?
+  /// Salted hash of the enrollment-time secret. The plaintext token is
+  /// shown to staff once at enrollment and never persisted.
+  secretHash    String
+  /// Last heartbeat timestamp. Null = never connected.
+  lastSeenAt    DateTime?
+  /// Capability flags reported by the agent — JSON list of method
+  /// namespaces it supports ("ad", "windows.services", etc.).
+  capabilitiesJson String?
+  isActive      Boolean   @default(true)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@index([clientName, isActive])
+  @@map("op_agents")
+  @@schema("opshub")
+}
+
+// ─── MONITORING (Phase 3 — empty in Phase 0) ───────────────────────────────
+
+/// Configured monitor check. Runner picks these up and dispatches to
+/// either a centralized prober (HTTPS / public DNS) or to the per-client
+/// Op_Agent (internal pings, SNMP, etc.).
+model Op_MonitorCheck {
+  id            String   @id @default(cuid())
+  clientName    String
+  /// Display name for the check ("Mail server ping", "billing portal HTTPS").
+  name          String
+  /// Check kind: "ping" | "tcp" | "https" | "snmp" | "dns".
+  kind          String
+  /// Target — IP, hostname, URL, OID. Shape depends on `kind`.
+  target        String
+  /// Interval in seconds. Default 60 = 1 minute.
+  intervalSec   Int      @default(60)
+  /// Optional check-specific config (e.g. expected HTTPS status code,
+  /// SNMP community, DNS expected value). JSON.
+  configJson    String?
+  /// "ok" | "warn" | "fail" | "unknown" — last evaluated state.
+  lastState     String   @default("unknown")
+  lastCheckedAt DateTime?
+  isActive      Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([clientName, isActive])
+  @@map("op_monitor_checks")
+  @@schema("opshub")
+}
+
+/// Alert routing rule. When a monitor check transitions ok→fail (or
+/// warn→fail), notifications fan out per the channels listed here.
+model Op_AlertRule {
+  id            String   @id @default(cuid())
+  clientName    String?  // null = applies to every client
+  /// Optional: limit rule to one specific check. Null = all checks
+  /// matching `clientName` scope.
+  checkId       String?
+  /// JSON array of channels to notify, e.g.
+  /// `[{"kind":"webpush","staffEmail":"mike@..."},{"kind":"ntfy","topic":"opshub-alerts"}]`
+  channelsJson  String
+  /// "ok->fail" | "warn->fail" | "any-state-change" — when the rule fires.
+  trigger       String   @default("ok->fail")
+  isActive      Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@map("op_alert_rules")
+  @@schema("opshub")
+}

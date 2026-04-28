@@ -1,0 +1,21 @@
+services:
+  app:
+    build: .
+    container_name: opshub-app
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+    ports:
+      # nginx on 100.91.194.83 reverse-proxies https://opshub.pcc2k.com → :3010
+      - "3010:3000"
+    networks:
+      # OpsHub joins DocHub's existing network so it can reach the shared
+      # Postgres (`db` alias) directly. The DB has its own `opshub`
+      # schema — no new postgres container needed.
+      - dochub_default
+
+networks:
+  dochub_default:
+    external: true

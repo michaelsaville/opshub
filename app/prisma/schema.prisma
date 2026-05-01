@@ -84,6 +84,15 @@ model Op_Agent {
   /// Salted hash of the enrollment-time secret. The plaintext token is
   /// shown to staff once at enrollment and never persisted.
   secretHash    String
+  /// Random 16-byte salt used with secretHash (PBKDF2-HMAC-SHA-256).
+  /// Per protocol §5.2 a fresh salt rotates on every (re-)enrollment.
+  salt          String?
+  /// AES-256-GCM-wrapped HMAC(token, "pcc2k.proof.v1"), keyed by the
+  /// gateway master key (PCC2K_AGENT_MASTER_KEY env, shared between
+  /// OpsHub and the gateway). Per protocol §4.2 — encryption-at-rest
+  /// is mandatory; without it, DB exfil becomes agent impersonation.
+  /// Format: base64(nonce(12) || ciphertext || tag(16)).
+  proofKeyEnc   String?
   /// Last heartbeat timestamp. Null = never connected.
   lastSeenAt    DateTime?
   /// Capability flags reported by the agent — JSON list of method
